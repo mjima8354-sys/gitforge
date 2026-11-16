@@ -1,0 +1,5 @@
+.ref/
+.gemini-task-*.md
+.pipeline*
+.build-run*
+.retry-*
