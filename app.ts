@@ -851,6 +851,24 @@ async function handleRestRequest(req: IncomingMessage, res: ServerResponse, path
       }
     }
 
+    // Releases (/api/v3/repos/:owner/:repo/releases)
+    if (subPath === '/releases' || subPath === '/releases/') {
+      if (method === 'GET') {
+        sendJson(res, 200, [], { 'X-GitHub-Request-Id': `${store.nextId.toString(16)}` });
+        return;
+      }
+    }
+
+    if (subPath.startsWith('/git/trees/') && method === 'GET') {
+      const sha = subPath.slice('/git/trees/'.length).replace(/\/$/, '');
+      if (repo.objects.has(sha)) {
+        sendJson(res, 200, { sha, url: '/api/v3/repos/octocat/demo/git/trees/' + sha, tree: [], truncated: false });
+      } else {
+        sendJson(res, 404, { message: 'Not Found' });
+      }
+      return;
+    }
+
     // Pull requests (/api/v3/repos/:owner/:repo/pulls)
     if (subPath === '/pulls' || subPath === '/pulls/') {
       if (method === 'GET') {
