@@ -212,7 +212,7 @@ function decodePackfileAndStore(packBuf: Buffer, repo: Repository): string[] {
   let offset = 12;
 
   for (let i = 0; i < numObjects && offset < packBuf.length - 20; i++) {
-    const b = packBuf[offset++];
+    let b = packBuf[offset++];
     const typeNum = (b >> 4) & 7;
     let size = b & 0x0f;
     let shift = 4;
@@ -469,42 +469,50 @@ async function handleGitRequest(req: IncomingMessage, res: ServerResponse, owner
 
     if (isV2) {
       // v2 upload-pack protocol
-      const packets = parsePktLines(reqBody);
+      const packets = parsePktLines(reqBody).map((p) => p.toString('utf8'));
       const bufs: Buffer[] = [];
       let command = '';
-      for (const pkt of packets) {
-        const str = pkt.toString('utf8').trim();
-        if (str.startsWith('ls-refs')) {
-          command = 'ls-refs';
-        } else if (str.startsWith('fetch')) {
-          command = 'fetch';
-        } else if (command === 'ls-refs') {
-          // output refs
-          for (const [refName, sha] of repo.refs.entries()) {
-            bufs.push(encodePktLine(`${sha} ${refName}\n`));
-          }
-          bufs.push(Buffer.from('0002', 'ascii')); // response-end
-        } else if (command === 'fetch' || str.startsWith('want')) {
-          // handle fetch wants
+      for (const str of packets) {
+        const line = str.trim();
+        if (line.startsWith('command=')) {
+          command = line.slice('command='.length).trim();
         }
       }
-      // If fetch, send packfile
-      const allObjs = [...repo.objects.values()];
-      const pack = buildPackfile(allObjs);
-      // side-band-64k wrap pack data
-      const sbBufs: Buffer[] = [];
-      sbBufs.push(Buffer.from('0002', 'ascii')); // ACK / shallow info end or packet
-      // wrap pack in side-band-64k (channel 1 = data)
-      let offset = 0;
-      while (offset < pack.length) {
-        const chunk = pack.subarray(offset, offset + 65516);
-        const pkt = Buffer.concat([Buffer.from([1]), chunk]);
-        sbBufs.push(encodePktLine(pkt));
-        offset += 65516;
+      if (command === 'ls-refs') {
+        const headSha = repo.refs.get('refs/heads/main') || ZERO_OID;
+        bufs.push(encodePktLine(`${headSha} HEAD symref-target:refs/heads/main\n`));
+        for (const [refName, sha] of repo.refs.entries()) {
+          bufs.push(encodePktLine(`${sha} ${refName}\n`));
+        }
+        bufs.push(Buffer.from('0000', 'ascii')); // flush: end of ls-refs response
+      } else if (command === 'fetch') {
+        const done = packets.some((s) => s.trim().startsWith('done'));
+        if (!done) {
+          // negotiate: no haves -> ready + NAK, client replies with done
+          bufs.push(encodePktLine('acknowledgments\n'));
+          bufs.push(encodePktLine('ready\n'));
+          bufs.push(encodePktLine('NAK\n'));
+          bufs.push(Buffer.from('0000', 'ascii'));
+        } else {
+          const allObjs = [...repo.objects.values()];
+          const pack = buildPackfile(allObjs);
+          bufs.push(encodePktLine('packfile\n'));
+          // side-band-64k wrap pack data (band 1 = pack)
+          let offset = 0;
+          while (offset < pack.length) {
+            const chunk = pack.subarray(offset, offset + 65516);
+            const pkt = Buffer.concat([Buffer.from([1]), chunk]);
+            bufs.push(encodePktLine(pkt));
+            offset += 65516;
+          }
+          bufs.push(Buffer.from('0000', 'ascii')); // flush
+        }
+      } else {
+        // unknown v2 command: send an empty packfile response
+        bufs.push(Buffer.from('0000', 'ascii'));
       }
-      sbBufs.push(Buffer.from('0000', 'ascii')); // flush
 
-      const resp = Buffer.concat([...bufs, ...sbBufs]);
+      const resp = Buffer.concat(bufs);
       res.writeHead(200, {
         'content-type': 'application/x-git-upload-pack-result',
         'content-length': resp.length
