@@ -1,16 +1,23 @@
-// Entrypoint: bind an ephemeral port, tell the env the port, then poll until
-// the env says the trial is over and exit 0. Imports only its own server —
-// no packages, no Node built-ins beyond what app.ts needs, no model calls.
+// Entrypoint for the entry<->env lifecycle.
+//
+//   1. Read MAKEFUN_ENV_URL (abort if unset).
+//   2. Build the app server from ./app.ts and listen on port 0 (ephemeral).
+//   3. POST {port} to $MAKEFUN_ENV_URL/register until accepted.
+//   4. Poll GET $MAKEFUN_ENV_URL/done until {"done": true}.
+//   5. Close the server and exit 0.
+//
+// Register/done failures are retried with short exponential backoff. Only a
+// hard contract error (400/405 from register) terminates with exit 1.
 
 import { createApp } from './app.ts';
 
 const ENV_URL = (process.env.MAKEFUN_ENV_URL ?? '').replace(/\/+$/, '');
-if (ENV_URL === '') {
-  process.stderr.write('[entry] MAKEFUN_ENV_URL is not set: nothing to register with\n');
+if (!ENV_URL) {
+  process.stderr.write('[entry] MAKEFUN_ENV_URL is not set; refusing to start\n');
   process.exit(1);
 }
 
-// Timing knobs for talking to the env.
+// HTTP timing knobs for talking to the env.
 const REQUEST_TIMEOUT_MS = 30_000;
 const BACKOFF_INITIAL_MS = 250;
 const BACKOFF_CAP_MS = 2_000;
@@ -29,9 +36,10 @@ async function envFetch(path: string, init?: RequestInit): Promise<Response> {
 }
 
 // POST {port} to /register until the env accepts it.
-// 200 means recorded; 409 means another entry registered first — not ours to fix,
-// keep waiting like any other entry. 400/405 are contract errors and terminate.
-// Anything else (network blip, slow env start) is retried with backoff.
+//   200 -> recorded.
+//   409 -> another entry registered first; not ours to fix, keep waiting.
+//   400/405 -> contract error; terminate.
+//   anything else (network blip, slow env start) -> retry with backoff.
 async function registerWithEnv(port: number): Promise<void> {
   for (let attempt = 0; ; attempt += 1) {
     try {
@@ -74,6 +82,7 @@ async function run(): Promise<void> {
     server.once('error', reject);
     server.listen(0, resolve);
   });
+
   const address = server.address();
   if (address === null || typeof address === 'string') {
     throw new Error('server did not bind an ephemeral TCP port');
@@ -84,7 +93,7 @@ async function run(): Promise<void> {
   process.stdout.write('[entry] registered; waiting for the env to say done\n');
 
   await waitForDone();
-  server.close();
+  await new Promise<void>((resolve) => server.close(resolve));
   process.stdout.write('[entry] done\n');
 }
 
