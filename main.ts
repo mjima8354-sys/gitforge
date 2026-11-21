@@ -22,10 +22,12 @@ const REQUEST_TIMEOUT_MS = 30_000;
 const BACKOFF_INITIAL_MS = 250;
 const BACKOFF_CAP_MS = 2_000;
 
+// Pause briefly before the next retry attempt.
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-// Short exponential backoff per failed attempt, capped at BACKOFF_CAP_MS.
+// Short exponential backoff: 250ms * 2^attempt, capped at BACKOFF_CAP_MS
+// (the exponent is clamped at 8 so the delay never grows beyond the cap).
 function backoffMs(attempt: number): number {
   return Math.min(BACKOFF_CAP_MS, BACKOFF_INITIAL_MS * 2 ** Math.min(attempt, 8));
 }
